@@ -1,8 +1,114 @@
 rules_version = '2';
 service cloud.firestore {
- match /databases/{database}/documents {
-  match /players/{uid} { allow read, write: if false; }
-  match /phoneIndex/{hash} { allow read, write: if false; }
-  match /leaderboard/{uid} { allow read: if true; allow write: if false; }
- }
+  match /databases/{database}/documents {
+    function isOwner(uid) {
+      return request.auth != null
+        && request.auth.uid == uid
+        && request.auth.token.firebase.sign_in_provider == 'anonymous';
+    }
+
+    function playerPath(uid) {
+      return /databases/$(database)/documents/players/$(uid);
+    }
+
+    function leaderboardPath(uid) {
+      return /databases/$(database)/documents/leaderboard/$(uid);
+    }
+
+    function validPlayerRegistration() {
+      return request.resource.data.keys().hasAll([
+          'firstName', 'lastName', 'displayName', 'phone', 'played', 'registeredAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'firstName', 'lastName', 'displayName', 'phone', 'played', 'registeredAt'
+        ])
+        && request.resource.data.firstName is string
+        && request.resource.data.firstName.size() > 0
+        && request.resource.data.firstName.size() <= 60
+        && request.resource.data.lastName is string
+        && request.resource.data.lastName.size() > 0
+        && request.resource.data.lastName.size() <= 60
+        && request.resource.data.displayName == request.resource.data.firstName + ' ' + request.resource.data.lastName
+        && request.resource.data.phone is string
+        && request.resource.data.phone.matches('^\\+?[0-9]{8,15}$')
+        && request.resource.data.played == false
+        && request.resource.data.registeredAt == request.time;
+    }
+
+    function validScoreFields() {
+      return request.resource.data.played == true
+        && request.resource.data.score is int
+        && request.resource.data.score >= 0
+        && request.resource.data.score <= 100
+        && request.resource.data.correctCount is int
+        && request.resource.data.correctCount >= 0
+        && request.resource.data.correctCount <= 5
+        && request.resource.data.score == request.resource.data.correctCount * 20
+        && request.resource.data.submittedAt == request.time;
+    }
+
+    match /players/{uid} {
+      // A player can read only their own private profile (including phone number).
+      allow get: if isOwner(uid);
+      allow list: if false;
+
+      // A UID can create one registration document. It cannot create it as already played.
+      allow create: if isOwner(uid) && validPlayerRegistration();
+
+      // The only allowed update is the one-time transition from not played to played.
+      // The corresponding leaderboard entry must be created in the same transaction.
+      allow update: if isOwner(uid)
+        && resource.data.played == false
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'played', 'score', 'correctCount', 'submittedAt'
+        ])
+        && validScoreFields()
+        && existsAfter(leaderboardPath(uid))
+        && getAfter(leaderboardPath(uid)).data.displayName == resource.data.displayName
+        && getAfter(leaderboardPath(uid)).data.score == request.resource.data.score
+        && getAfter(leaderboardPath(uid)).data.correctCount == request.resource.data.correctCount
+        && getAfter(leaderboardPath(uid)).data.totalQuestions == 5
+        && getAfter(leaderboardPath(uid)).data.submittedAt == request.time;
+
+      allow delete: if false;
+    }
+
+    match /leaderboard/{uid} {
+      // Names and scores are intentionally public for the scoreboard.
+      allow get, list: if true;
+
+      // The entry is accepted only as part of the same atomic transaction that locks the player.
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasAll([
+          'displayName', 'score', 'correctCount', 'totalQuestions', 'submittedAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'displayName', 'score', 'correctCount', 'totalQuestions', 'submittedAt'
+        ])
+        && request.resource.data.displayName is string
+        && request.resource.data.score is int
+        && request.resource.data.score >= 0
+        && request.resource.data.score <= 100
+        && request.resource.data.correctCount is int
+        && request.resource.data.correctCount >= 0
+        && request.resource.data.correctCount <= 5
+        && request.resource.data.score == request.resource.data.correctCount * 20
+        && request.resource.data.totalQuestions == 5
+        && request.resource.data.submittedAt == request.time
+        && exists(playerPath(uid))
+        && get(playerPath(uid)).data.played == false
+        && getAfter(playerPath(uid)).data.played == true
+        && getAfter(playerPath(uid)).data.displayName == request.resource.data.displayName
+        && getAfter(playerPath(uid)).data.score == request.resource.data.score
+        && getAfter(playerPath(uid)).data.correctCount == request.resource.data.correctCount
+        && getAfter(playerPath(uid)).data.submittedAt == request.time;
+
+      allow update, delete: if false;
+    }
+
+    // The legacy phoneIndex collection is no longer used by this Spark-only version.
+    match /phoneIndex/{documentId} {
+      allow read, write: if false;
+    }
+  }
 }
