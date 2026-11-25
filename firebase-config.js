@@ -1,3 +1,4 @@
+// Firebase Console > Project settings > General > Your apps > Web app
 export const firebaseConfig = {
   apiKey: "AIzaSyBVNmoT5MA0TbrrwdnUOwYE388UW2d2ViA",
   authDomain: "web-quiz-c2061.firebaseapp.com",
