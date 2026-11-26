@@ -9,9 +9,6 @@ import {
 import {
   getFirestore,
   collection,
-  query,
-  orderBy,
-  limit,
   getDocs,
   getDoc,
   doc,
@@ -103,7 +100,7 @@ function home() {
       <div>
         <small>READY TO PLAY?</small>
         <h1>ท้าทายความรู้<br><em>ลุ้นคะแนนสูงสุด!</em></h1>
-        <p>ตอบคำถามให้ถูกต้อง สะสมคะแนน และขึ้นสู่ Leaderboard</p>
+        <p>เล่นได้หลายครั้ง ระบบบันทึกทุกผลการเล่น และจัดอันดับด้วยคะแนนสูงสุด</p>
         <div class="tags"><span>✦ 5 คำถาม</span><span>✦ 4 ตัวเลือก</span><span>✦ เล่นฟรี</span></div>
       </div>
     </section>
@@ -115,7 +112,7 @@ function home() {
         <label class="wide">เบอร์โทรศัพท์<input name="phone" required inputmode="tel" pattern="[0-9+\\- ]{8,20}" maxlength="20" placeholder="กรอกเบอร์โทรศัพท์"></label>
         <button class="primary wide">เริ่มเล่นเกม <span>→</span></button>
       </form>
-      <p class="note">ข้อมูลใช้เพื่อเข้าร่วมกิจกรรมและติดต่อผู้ได้รับรางวัลเท่านั้น</p>
+      <p class="note">ระบบจะบันทึกคะแนนทุกครั้งที่เล่น และใช้คะแนนสูงสุดของคุณในการจัดอันดับ</p>
     </section>`;
   document.querySelector("#reg").onsubmit = register;
 }
@@ -147,8 +144,7 @@ async function register(event) {
     const user = await ensureAnonymousUser();
     const playerRef = doc(db, "players", user.uid);
 
-    // A document is created once per Firebase anonymous UID.
-    // Returning on the same browser reuses that same account/document.
+    // The same anonymous UID reuses its original profile, but can start another attempt.
     const savedPlayer = await runTransaction(db, async (transaction) => {
       const snapshot = await transaction.get(playerRef);
       if (snapshot.exists()) return snapshot.data();
@@ -158,7 +154,7 @@ async function register(event) {
         lastName,
         displayName: `${firstName} ${lastName}`,
         phone,
-        played: false,
+        attemptCount: 0,
         registeredAt: serverTimestamp()
       };
       transaction.set(playerRef, newPlayer);
@@ -170,24 +166,18 @@ async function register(event) {
       name: savedPlayer.displayName || `${savedPlayer.firstName} ${savedPlayer.lastName}`
     };
 
-    if (savedPlayer.played) {
-      showResult({
-        score: Number(savedPlayer.score ?? 0),
-        correctCount: Number(savedPlayer.correctCount ?? 0),
-        totalQuestions: TOTAL_QUESTIONS,
-        already: true
-      });
-      return;
-    }
-
-    answers = Array(TOTAL_QUESTIONS).fill(null);
-    submitted = false;
-    renderQuestion(0);
+    startQuiz();
   } catch (error) {
     alert(messageForError(error));
     button.disabled = false;
     button.innerHTML = 'เริ่มเล่นเกม <span>→</span>';
   }
+}
+
+function startQuiz() {
+  answers = Array(TOTAL_QUESTIONS).fill(null);
+  submitted = false;
+  renderQuestion(0);
 }
 
 function renderQuestion(index) {
@@ -247,62 +237,102 @@ async function finish() {
   }, 0);
   const score = correctCount * POINTS_PER_QUESTION;
 
+  let attemptRef = null;
   try {
     const user = auth.currentUser;
     if (!user || user.uid !== player.uid) throw new Error("ไม่พบ session ผู้เล่น กรุณากลับไปลงทะเบียนอีกครั้ง");
 
     const playerRef = doc(db, "players", user.uid);
     const leaderboardRef = doc(db, "leaderboard", user.uid);
+    // A separate document is created for every completed attempt.
+    attemptRef = doc(collection(db, "players", user.uid, "attempts"));
 
-    // The player lock and leaderboard entry must be committed atomically.
-    // Firestore Rules use getAfter() to require both writes in one transaction.
-    await runTransaction(db, async (transaction) => {
+    const savedResult = await runTransaction(db, async (transaction) => {
       const playerSnapshot = await transaction.get(playerRef);
       const leaderboardSnapshot = await transaction.get(leaderboardRef);
 
       if (!playerSnapshot.exists()) throw new Error("ไม่พบข้อมูลผู้เล่น กรุณาลงทะเบียนใหม่");
-      if (playerSnapshot.data().played || leaderboardSnapshot.exists()) {
-        throw new Error("บัญชีนี้ส่งคำตอบไปแล้ว ไม่สามารถเล่นซ้ำได้");
-      }
 
-      const displayName = playerSnapshot.data().displayName;
+      const playerData = playerSnapshot.data();
+      // Legacy accounts from the one-play version may not have attemptCount yet.
+      const previousAttempts = Number(playerData.attemptCount ?? (playerData.played ? 1 : 0));
+      const attemptNumber = previousAttempts + 1;
       const submittedAt = serverTimestamp();
 
       transaction.update(playerRef, {
-        played: true,
-        score,
-        correctCount,
-        submittedAt
+        attemptCount: attemptNumber,
+        lastPlayedAt: submittedAt,
+        lastAttemptId: attemptRef.id
       });
-      transaction.set(leaderboardRef, {
-        displayName,
+
+      transaction.set(attemptRef, {
+        displayName: playerData.displayName,
+        attemptNumber,
         score,
         correctCount,
         totalQuestions: TOTAL_QUESTIONS,
         submittedAt
       });
+
+      // Keep one public leaderboard row per UID, containing that player's best score.
+      // Older Spark builds used `score`; read it as a legacy best score during transition.
+      const oldBoard = leaderboardSnapshot.exists() ? leaderboardSnapshot.data() : null;
+      const previousBest = oldBoard
+        ? Number(oldBoard.bestScore ?? oldBoard.score ?? -1)
+        : -1;
+      const isNewBest = score > previousBest;
+      const bestScore = isNewBest ? score : previousBest;
+      const bestCorrectCount = isNewBest
+        ? correctCount
+        : Number(oldBoard?.bestCorrectCount ?? oldBoard?.correctCount ?? 0);
+
+      if (isNewBest) {
+        transaction.set(leaderboardRef, {
+          displayName: playerData.displayName,
+          bestScore: score,
+          bestCorrectCount: correctCount,
+          totalQuestions: TOTAL_QUESTIONS,
+          bestSubmittedAt: submittedAt,
+          latestAttemptId: attemptRef.id
+        });
+      }
+
+      return { attemptNumber, bestScore, isNewBest };
     });
 
-    showResult({ score, correctCount, totalQuestions: TOTAL_QUESTIONS });
+    showResult({
+      score,
+      correctCount,
+      totalQuestions: TOTAL_QUESTIONS,
+      attemptNumber: savedResult.attemptNumber,
+      bestScore: savedResult.bestScore,
+      isNewBest: savedResult.isNewBest
+    });
   } catch (error) {
-    // If a previous request completed but its response was lost, show the saved result.
+    // Recover gracefully if the transaction committed but the response was interrupted.
     try {
       const user = auth.currentUser;
-      if (user && user.uid === player.uid) {
-        const saved = await getDoc(doc(db, "players", user.uid));
-        if (saved.exists() && saved.data().played) {
-          const data = saved.data();
+      if (user && user.uid === player.uid && attemptRef) {
+        const [attemptSnapshot, leaderboardSnapshot] = await Promise.all([
+          getDoc(attemptRef),
+          getDoc(doc(db, "leaderboard", user.uid))
+        ]);
+        if (attemptSnapshot.exists()) {
+          const attempt = attemptSnapshot.data();
+          const board = leaderboardSnapshot.exists() ? leaderboardSnapshot.data() : {};
           showResult({
-            score: Number(data.score ?? 0),
-            correctCount: Number(data.correctCount ?? 0),
-            totalQuestions: TOTAL_QUESTIONS,
-            already: true
+            score: Number(attempt.score ?? 0),
+            correctCount: Number(attempt.correctCount ?? 0),
+            totalQuestions: Number(attempt.totalQuestions ?? TOTAL_QUESTIONS),
+            attemptNumber: Number(attempt.attemptNumber ?? 1),
+            bestScore: Number(board.bestScore ?? board.score ?? attempt.score ?? 0),
+            isNewBest: board.latestAttemptId === attemptRef.id
           });
           return;
         }
       }
     } catch (readError) {
-      console.error("Could not retrieve saved player result:", readError);
+      console.error("Could not retrieve saved attempt:", readError);
     }
 
     submitted = false;
@@ -319,23 +349,25 @@ async function finish() {
 }
 
 function showResult(result) {
-  const alreadyPlayed = Boolean(result.already);
   root.innerHTML = `
     <section class="card result">
-      <div class="trophy">${alreadyPlayed ? "✅" : "🎉"}</div>
-      <small>QUIZ ${alreadyPlayed ? "ALREADY COMPLETED" : "COMPLETED"}</small>
-      <h1>${alreadyPlayed ? "บัญชีนี้เล่นไปแล้ว" : "เก่งมาก!"}</h1>
-      <p>${alreadyPlayed ? "บัญชีนี้ส่งคำตอบแล้ว ไม่สามารถเล่นซ้ำได้" : "คุณทำแบบทดสอบครบแล้ว"}</p>
-      <div class="score-ring"><strong>${Number(result.score ?? 0)}</strong><span>คะแนน</span></div>
+      <div class="trophy">${result.isNewBest ? "🏆" : "🎉"}</div>
+      <small>QUIZ COMPLETED · ATTEMPT ${Number(result.attemptNumber ?? 1)}</small>
+      <h1>${result.isNewBest ? "ทำคะแนนสูงสุดใหม่!" : "บันทึกผลเรียบร้อย!"}</h1>
+      <p>ระบบบันทึกผลการเล่นครั้งนี้แล้ว</p>
+      <div class="score-ring"><strong>${Number(result.score ?? 0)}</strong><span>คะแนนครั้งนี้</span></div>
       <h3>${esc(player?.name ?? "ผู้เล่น")}</h3>
-      <p>ตอบถูก ${Number(result.correctCount ?? 0)} จาก ${TOTAL_QUESTIONS} ข้อ</p>
+      <p>ตอบถูก ${Number(result.correctCount ?? 0)} จาก ${Number(result.totalQuestions ?? TOTAL_QUESTIONS)} ข้อ</p>
+      <p><strong>คะแนนสูงสุดของคุณ: ${Number(result.bestScore ?? result.score ?? 0)} คะแนน</strong></p>
       <div class="result-actions">
-        <button class="primary" id="board">ดูตารางคะแนน</button>
-        <button class="secondary" id="again">กลับหน้าแรก</button>
+        <button class="primary" id="again">เล่นอีกครั้ง</button>
+        <button class="secondary" id="board">ดูตารางคะแนน</button>
+        <button class="secondary" id="backHome">กลับหน้าแรก</button>
       </div>
     </section>`;
+  document.querySelector("#again").onclick = startQuiz;
   document.querySelector("#board").onclick = leaderboard;
-  document.querySelector("#again").onclick = home;
+  document.querySelector("#backHome").onclick = home;
 }
 
 function messageForError(error) {
@@ -352,7 +384,7 @@ async function leaderboard() {
   root.innerHTML = `
     <section class="dashboard">
       <div class="dashhead">
-        <div><small>LIVE SCOREBOARD</small><h1>Leaderboard</h1><p>อันดับผู้เข้าร่วมกิจกรรม</p></div>
+        <div><small>LIVE SCOREBOARD</small><h1>Leaderboard</h1><p>จัดอันดับด้วยคะแนนสูงสุดของผู้เล่นแต่ละคน</p></div>
         <button class="secondary" id="refresh">↻ รีเฟรช</button>
       </div>
       <div class="stats">
@@ -360,7 +392,7 @@ async function leaderboard() {
         <div class="card stat"><span>🏆</span><strong id="best">—</strong><small>คะแนนสูงสุด</small></div>
         <div class="card stat"><span>🎯</span><strong>${TOTAL_QUESTIONS}</strong><small>จำนวนคำถาม</small></div>
       </div>
-      <section class="card board"><h2>🏆 ตารางคะแนน</h2><div id="table"><div class="loading">กำลังโหลด…</div></div></section>
+      <section class="card board"><h2>🏆 ตารางคะแนน (นับคะแนนดีที่สุด)</h2><div id="table"><div class="loading">กำลังโหลด…</div></div></section>
       <button class="secondary back" id="back">← กลับหน้าแรก</button>
     </section>`;
 
@@ -368,32 +400,38 @@ async function leaderboard() {
   document.querySelector("#back").onclick = home;
 
   try {
-    // A single-field query avoids requiring a composite Firestore index.
-    const snapshot = await getDocs(query(
-      collection(db, "leaderboard"),
-      orderBy("score", "desc"),
-      limit(200)
-    ));
-
-    const rows = snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
-    rows.sort((a, b) => {
-      const scoreDifference = Number(b.score ?? 0) - Number(a.score ?? 0);
-      if (scoreDifference !== 0) return scoreDifference;
-      const aTime = a.submittedAt?.toMillis?.() ?? 0;
-      const bTime = b.submittedAt?.toMillis?.() ?? 0;
-      return aTime - bTime;
+    // Read one public best-score document per UID. Read all rows to include legacy entries
+    // that used the old `score` field, then normalize the field in the browser.
+    const snapshot = await getDocs(collection(db, "leaderboard"));
+    const rows = snapshot.docs.map((item) => {
+      const data = item.data();
+      return {
+        id: item.id,
+        ...data,
+        displayScore: Number(data.bestScore ?? data.score ?? 0),
+        displayDate: data.bestSubmittedAt ?? data.submittedAt ?? null
+      };
     });
 
+    rows.sort((a, b) => {
+      const scoreDifference = b.displayScore - a.displayScore;
+      if (scoreDifference !== 0) return scoreDifference;
+      const aTime = a.displayDate?.toMillis?.() ?? 0;
+      const bTime = b.displayDate?.toMillis?.() ?? 0;
+      return aTime - bTime;
+    });
+    const visibleRows = rows.slice(0, 200);
+
     document.querySelector("#total").textContent = rows.length;
-    document.querySelector("#best").textContent = rows[0]?.score ?? 0;
-    document.querySelector("#table").innerHTML = rows.length
-      ? `<div class="scroll"><table><thead><tr><th>อันดับ</th><th>ชื่อผู้เล่น</th><th>คะแนน</th><th>เวลาเล่น</th></tr></thead><tbody>
-          ${rows.map((row, index) => `
+    document.querySelector("#best").textContent = visibleRows[0]?.displayScore ?? 0;
+    document.querySelector("#table").innerHTML = visibleRows.length
+      ? `<div class="scroll"><table><thead><tr><th>อันดับ</th><th>ชื่อผู้เล่น</th><th>คะแนนสูงสุด</th><th>วันที่ทำคะแนนสูงสุด</th></tr></thead><tbody>
+          ${visibleRows.map((row, index) => `
             <tr>
               <td><span class="rank ${index < 3 ? "top" : ""}">${index < 3 ? ["🥇", "🥈", "🥉"][index] : index + 1}</span></td>
               <td class="name">${esc(row.displayName)}</td>
-              <td><b class="points">${Number(row.score ?? 0)}</b></td>
-              <td class="time">${row.submittedAt?.toDate ? row.submittedAt.toDate().toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }) : "—"}</td>
+              <td><b class="points">${row.displayScore}</b></td>
+              <td class="time">${row.displayDate?.toDate ? row.displayDate.toDate().toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }) : "—"}</td>
             </tr>`).join("")}
         </tbody></table></div>`
       : `<div class="empty">ยังไม่มีผู้เล่น ลองเป็นคนแรก! 🎮</div>`;
