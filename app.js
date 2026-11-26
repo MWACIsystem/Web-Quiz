@@ -26,9 +26,9 @@ const root = document.querySelector("#app");
 // This means a technically capable player can inspect or alter them.
 const QUESTIONS = [
   {
-    question: "น้ำประปาที่ผ่านกระบวนการผลิตมีการเติมสารใดเพื่อช่วยฆ่าเชื้อโรค?",
-    options: ["คลอรีน", "น้ำตาล", "น้ำมัน", "แป้ง"],
-    correct: 0
+    question: "ตัวอักษร R ในแนวคิด QWATER ของ กปน. หมายถึงข้อใด?",
+    options: ["Responsibility – รับผิดชอบต่อสังคม","Reputation – สร้างชื่อเสียงความภูมิใจให้ กปน.","Respect to Transparency – ด้วยความโปร่งใส","Reliability – สร้างความน่าเชื่อถือ"],
+    correct: 2
   },
   {
     question: "ข้อใดเป็นวิธีประหยัดน้ำที่เหมาะสม?",
