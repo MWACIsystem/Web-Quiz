@@ -1,8 +1,8 @@
 const {onCall,HttpsError}=require("firebase-functions/v2/https");const {initializeApp}=require("firebase-admin/app");const {getFirestore,FieldValue}=require("firebase-admin/firestore");const crypto=require("crypto");initializeApp();const db=getFirestore();
 // Quiz content and correct answers are server-side. Edit this array to customize.
 const QUESTIONS=[
-{question:"น้ำประปาที่ผ่านกระบวนการผลิตมีการเติมสารใดเพื่อช่วยฆ่าเชื้อโรค?",options:["คลอรีน","น้ำตาล","น้ำมัน","แป้ง"],correct:0},
-{question:"ข้อใดเป็นวิธีประหยัดน้ำที่เหมาะสม?",options:["เปิดน้ำทิ้งไว้","ซ่อมก๊อกที่รั่ว","ล้างรถทุกวัน","ปล่อยน้ำไหลตอนแปรงฟัน"],correct:1},
+{question:"ตัวอักษร R ในแนวคิด QWATER ของ กปน. หมายถึงข้อใด??",options:["Responsibility – รับผิดชอบต่อสังคม","Reputation – สร้างชื่อเสียงความภูมิใจให้ กปน.","Respect to Transparency – ด้วยความโปร่งใส","Reliability – สร้างความน่าเชื่อถือ"],correct:2},
+{question:"คำขวัญองค์กรคือข้อใด?",options:["น้ำประปาสะอาด เพื่อคุณภาพชีวิตที่ดีของประชาชน","การประปานครหลวง ประปาเพื่อประชาชน","มุ่งมั่นพัฒนาน้ำประปา เพื่ออนาคตที่ยั่งยืน","น้ำใส สะอาด ปลอดภัย ใส่ใจประชาชน"],correct:1},
 {question:"ควรทำอย่างไรเมื่อพบเห็นท่อประปารั่ว?",options:["ปล่อยไว้","แจ้งหน่วยงานที่เกี่ยวข้อง","เอาดินกลบ","รอให้หยุดเอง"],correct:1},
 {question:"น้ำมีความสำคัญต่อสิ่งมีชีวิตอย่างไร?",options:["ไม่มีความสำคัญ","ใช้เฉพาะทำความสะอาด","จำเป็นต่อการดำรงชีวิต","ใช้แทนอาหารได้"],correct:2},
 {question:"การใช้น้ำอย่างรู้คุณค่าคือข้อใด?",options:["ใช้น้ำเกินจำเป็น","เปิดน้ำทิ้ง","ใช้เท่าที่จำเป็นและปิดเมื่อไม่ใช้","ไม่ตรวจอุปกรณ์"],correct:2}];
